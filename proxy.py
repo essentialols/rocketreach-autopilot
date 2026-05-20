@@ -340,40 +340,78 @@ def _flare_get(url: str, timeout: int = 30000) -> str:
     return d["solution"]["response"]
 
 
+CARD_RE = re.compile(
+    r'data-profile-card-id="(\d+)"(.*?)(?=data-profile-card-id=|</body>)',
+    re.DOTALL,
+)
+CARD_NAME_RE = re.compile(r'id="profile-name"[^>]*>\s*([^<]+)')
+CARD_TEXT_RE = re.compile(r'<p[^>]*>\s*([^<]+?)\s*</p>')
+CARD_COMPANY_RE = re.compile(
+    r'href="(/[^"]*-profile_[^"]+)"[^>]*>\s*<span[^>]*>\s*([^<]+)'
+)
+CARD_LOCATION_RE = re.compile(
+    r'(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
+    r'Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|'
+    r'Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|'
+    r'Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|'
+    r'New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|'
+    r'Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|'
+    r'Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|'
+    r'United States|United Kingdom|Canada|India|Germany|France|Australia'
+    r')[^<]{0,60}'
+)
+
+
 def _parse_search_results(html: str) -> list:
-    profile_links = PROFILE_LINK_RE.findall(html)
-    all_names = PERSON_NAME_RE.findall(html)
-    names = [n for n in all_names if n not in SKIP_NAMES and 5 < len(n) < 40]
-    titles = TITLE_RE.findall(html)
-    email_domains = EMAIL_DOMAIN_RE.findall(html)
-    email_domains = [
-        e for e in email_domains
-        if not any(x in e for x in ("rocketreach", "sentry", "google", "datadoghq"))
-    ]
-    phones = PHONE_RE.findall(html)
+    """Parse structured results from profile cards in rendered HTML."""
+    cards = CARD_RE.findall(html)
+    results = []
 
-    results, seen = [], set()
-    for name in names:
-        if name in seen:
-            continue
-        seen.add(name)
-        entry = {"name": name}
-        slug = name.lower().replace(" ", "-")
-        for link in profile_links:
-            if slug in link.lower():
-                entry["profile_url"] = f"https://rocketreach.co{link}"
-                break
-        results.append(entry)
+    for profile_id, card_html in cards:
+        entry = {"id": int(profile_id)}
 
-    for i, title in enumerate(titles):
-        if i < len(results):
-            results[i]["title"] = title.strip()
-    for i, email in enumerate(email_domains):
-        if i < len(results):
-            results[i]["email_domain"] = f"@{email}"
-    for i, phone in enumerate(phones):
-        if i < len(results):
-            results[i]["phone_hint"] = phone
+        # Name
+        name_match = CARD_NAME_RE.search(card_html)
+        if name_match:
+            entry["name"] = name_match.group(1).strip()
+
+        # Title + company from sequential <p> tags
+        texts = [t.strip() for t in CARD_TEXT_RE.findall(card_html)
+                 if t.strip() and len(t.strip()) > 2
+                 and t.strip() not in ("Get contact info to view data",)]
+        if len(texts) >= 2:
+            entry["title"] = texts[1]  # first is name, second is title
+        if len(texts) >= 3:
+            entry["company"] = texts[2]
+
+        # Company link
+        company_match = CARD_COMPANY_RE.search(card_html)
+        if company_match:
+            entry["company_url"] = f"https://rocketreach.co{company_match.group(1)}"
+            if "company" not in entry:
+                entry["company"] = company_match.group(2).strip()
+
+        # Email hints
+        emails = EMAIL_DOMAIN_RE.findall(card_html)
+        emails = [e for e in emails if not any(
+            x in e for x in ("rocketreach", "sentry", "google", "datadoghq")
+        )]
+        if emails:
+            entry["email_domain"] = f"@{emails[0]}"
+
+        # Phone hints
+        phones = PHONE_RE.findall(card_html)
+        if phones:
+            entry["phone_hint"] = phones[0]
+
+        # Location
+        loc_match = CARD_LOCATION_RE.search(card_html)
+        if loc_match:
+            entry["location"] = loc_match.group(0).strip().rstrip(",")
+
+        if entry.get("name"):
+            results.append(entry)
+
     return results
 
 
