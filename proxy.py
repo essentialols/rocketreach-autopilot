@@ -270,20 +270,116 @@ def captcha(req: CaptchaRequest):
         raise HTTPException(500, str(e))
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8420)
+# --------------------------------------------------------------------------- #
+# FlareSolverr integration (Cloudflare bypass via headless Chrome)
+# --------------------------------------------------------------------------- #
+FLARESOLVERR_URL = "http://localhost:8191/v1"
+FLARE_SESSION = "rocketreach"
+_flare_initialized = False
+
+PROFILE_LINK_RE = re.compile(r'href="(/[^"]*-profile_[^"]+)"')
+PERSON_NAME_RE = re.compile(r'>([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)</(?:p|span|h[1-6]|a|div)')
+TITLE_RE = re.compile(
+    r'>((?:Chief|CEO|CTO|CFO|COO|VP|Vice President|Director|Manager|'
+    r'Engineer|President|Owner|Founder|Head of|Senior|Lead|Principal)[^<]{0,80})<'
+)
+EMAIL_DOMAIN_RE = re.compile(r'@([a-zA-Z0-9.-]+\.[a-z]{2,})')
+PHONE_RE = re.compile(r'\+1[\s-]?\d{3}[\s-]?\d{3}[\s-]?\w{4}')
+SKIP_NAMES = frozenset({
+    "Getting Started", "My Contacts", "My Companies", "Upload List",
+    "Browser Extension", "View Usage", "All Results", "Net New",
+    "Learn More", "Contact Details", "Get Contacts", "Sign Up",
+    "Log In", "Search Results", "Find Email", "Account Settings",
+    "Search Filters", "Community Program Terms", "View Privacy Policy",
+    "Keyword Search", "Performance Cookies", "Strictly Necessary Cookies",
+    "Always Active", "Targeting Cookies", "Functional Cookies",
+    "Cookie List", "Back To Top", "Sales Engagement", "Chrome Extension",
+    "Privacy Policy", "Terms Of Service", "Contact Us", "Help Center",
+    "About Us", "Saved Lists", "Team Management", "Phone Numbers",
+    "Email Addresses", "Social Links", "Company Info",
+})
 
 
-# --------------------------------------------------------------------------- #
-# HTML-based search (fetches person page and parses rendered HTML)
-# --------------------------------------------------------------------------- #
-@app.post("/search/html")
-def search_html(req: SearchRequest):
-    """
-    Search by fetching the person page HTML.
-    Works when the API is blocked by anti-bot but the page still loads.
-    """
+def _init_flaresolverr():
+    global _flare_initialized
+    if _flare_initialized:
+        return
+    try:
+        requests.post(FLARESOLVERR_URL, json={
+            "cmd": "sessions.create", "session": FLARE_SESSION,
+        }, timeout=10, verify=False)
+    except Exception:
+        pass
+    cookie_list = [
+        {"name": c.name, "value": c.value, "domain": c.domain or "rocketreach.co"}
+        for c in SESSION.cookies
+    ]
+    if cookie_list:
+        requests.post(FLARESOLVERR_URL, json={
+            "cmd": "request.get",
+            "url": "https://rocketreach.co/login",
+            "session": FLARE_SESSION,
+            "maxTimeout": 30000,
+            "cookies": cookie_list,
+        }, timeout=35, verify=False)
+    _flare_initialized = True
+    log.info("FlareSolverr session initialized")
+
+
+def _flare_get(url: str, timeout: int = 30000) -> str:
+    _init_flaresolverr()
+    r = requests.post(FLARESOLVERR_URL, json={
+        "cmd": "request.get",
+        "url": url,
+        "session": FLARE_SESSION,
+        "maxTimeout": timeout,
+    }, timeout=timeout // 1000 + 10, verify=False)
+    d = r.json()
+    if d.get("status") != "ok":
+        raise RuntimeError(f"FlareSolverr: {d.get('message', 'unknown')}")
+    return d["solution"]["response"]
+
+
+def _parse_search_results(html: str) -> list:
+    profile_links = PROFILE_LINK_RE.findall(html)
+    all_names = PERSON_NAME_RE.findall(html)
+    names = [n for n in all_names if n not in SKIP_NAMES and 5 < len(n) < 40]
+    titles = TITLE_RE.findall(html)
+    email_domains = EMAIL_DOMAIN_RE.findall(html)
+    email_domains = [
+        e for e in email_domains
+        if not any(x in e for x in ("rocketreach", "sentry", "google", "datadoghq"))
+    ]
+    phones = PHONE_RE.findall(html)
+
+    results, seen = [], set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        entry = {"name": name}
+        slug = name.lower().replace(" ", "-")
+        for link in profile_links:
+            if slug in link.lower():
+                entry["profile_url"] = f"https://rocketreach.co{link}"
+                break
+        results.append(entry)
+
+    for i, title in enumerate(titles):
+        if i < len(results):
+            results[i]["title"] = title.strip()
+    for i, email in enumerate(email_domains):
+        if i < len(results):
+            results[i]["email_domain"] = f"@{email}"
+    for i, phone in enumerate(phones):
+        if i < len(results):
+            results[i]["phone_hint"] = phone
+    return results
+
+
+@app.post("/search/flare")
+def search_flare(req: SearchRequest):
+    """Search for people via FlareSolverr (bypasses Cloudflare)."""
     _ensure_cookies()
     params = f"name={req.name.replace(' ', '+')}&start={req.page}&pageSize={req.page_size}"
     if req.employer:
@@ -292,38 +388,26 @@ def search_html(req: SearchRequest):
         params += f"&current_title={req.title.replace(' ', '+')}"
     if req.location:
         params += f"&location={req.location.replace(' ', '+')}"
-
     url = f"https://rocketreach.co/person?{params}"
-    r = SESSION.get(url, headers={
-        "Referer": "https://rocketreach.co/dashboard",
-        "Accept": "text/html,application/xhtml+xml",
-    })
-
-    # The page is an Angular SPA — data is loaded via XHR, not in initial HTML.
-    # But we can check if there's any server-side rendered content.
-    import re
-    title = re.search(r"<title>([^<]+)", r.text)
-    meta_desc = re.search(r'name="description"\s+content="([^"]+)"', r.text)
-
-    return {
-        "url": url,
-        "status": r.status_code,
-        "title": title.group(1) if title else None,
-        "description": meta_desc.group(1) if meta_desc else None,
-        "note": "SPA page — results require JS execution. Use /search for API-based search or push fresh cookies.",
-        "page_size_bytes": len(r.text),
-    }
+    log.info(f"FlareSolverr search: {url}")
+    try:
+        html = _flare_get(url)
+        results = _parse_search_results(html)
+        return {"results": results, "count": len(results), "url": url, "source": "flaresolverr"}
+    except Exception as e:
+        raise HTTPException(500, f"FlareSolverr error: {e}")
 
 
-# --------------------------------------------------------------------------- #
-# Auto-refresh: cron endpoint for local machine to push cookies
-# --------------------------------------------------------------------------- #
 @app.post("/cookies/refresh")
 def refresh_cookies(req: CookieSet):
-    """
-    Same as /cookies but logs the refresh for monitoring.
-    Called periodically from the local machine to keep session alive.
-    """
+    """Update cookies and reset FlareSolverr session."""
+    global _flare_initialized
     result = set_cookies(req)
+    _flare_initialized = False
     log.info(f"Cookie refresh: user={result.get('user')}, credits={result.get('credits')}")
     return {**result, "refreshed_at": time.time()}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8420)
