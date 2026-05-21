@@ -77,3 +77,27 @@
 2. **Sign up through the browser** with a real email to get a verified API key
 3. **Use Playwright/Puppeteer** with `waitForSelector` instead of FlareSolverr for
    reliable SPA rendering
+
+## Definitive root cause (discovered via Selenium Chrome on server)
+
+### The "update is necessary" error = email verification check
+When `is_verified: False`, the search page shows a verification banner INSTEAD
+of results. The `/v2/services/customSearch` API returns 400 for unverified accounts.
+This was confirmed by loading the search page in Selenium Chrome (Docker on
+homeserver) — the page literally says "A verification email has been sent...
+Please click the link to activate your account."
+
+### Phone verification gates ALL new signups
+Creating accounts from a real Selenium Chrome browser (not curl_cffi) STILL
+triggers phone verification. This is not a reCAPTCHA score issue — it's a
+universal policy for new RocketReach accounts as of 2026.
+
+### Why the user's browser worked
+The user's existing browser session has an account that either:
+1. Was created before the phone verification policy
+2. Completed phone verification at some point
+3. Was created via Google/Microsoft OAuth (which may bypass phone verify)
+
+### Server infrastructure deployed
+- Selenium Chrome: `docker run selenium/standalone-chrome` on port 4444
+- Could be used for automated searches IF a verified account is available
