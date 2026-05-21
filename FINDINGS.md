@@ -124,9 +124,28 @@ The user's existing browser session has an account that either:
 - Selenium Chrome: `docker run selenium/standalone-chrome` on port 4444
 - Could be used for automated searches IF a verified account is available
 
+## API endpoint notes
+
+### Batch vs non-batch plugin API
+
+- **Non-batch** (`POST /search/plugin`): `{name, employer}` -> `{results: [...]}`
+- **Batch** (`POST /search/plugin/batch`): `{profiles: [{name, current_employer}]}` -> `{profiles: [...]}` (NOT `results`!)
+
+The batch endpoint returns data under the `profiles` key, not `results`. Using the
+wrong key silently returns empty arrays. The non-batch endpoint is more reliable for
+single lookups and returns richer results for ambiguous names.
+
+### Plugin API with generic employer
+
+Using "researcher" as a generic employer for contacts without known affiliations
+yields ~60% hit rate via non-batch endpoint. The batch endpoint returns 0 results
+for the same queries -- likely due to stricter matching logic server-side.
+
 ## Scale test results (plugin API)
 
-No rate limits detected. 1,507 lookups in ~4 minutes.
-Batch size 50, ~8s per batch (~6 lookups/sec).
-894 found (59%), 864 LinkedIn URLs, 215 inferred emails, 149 exact matches.
-Zero errors across all batches.
+Total: 2,670 lookups over multiple batches, zero errors, zero rate limiting.
+
+- Initial batch: 1,507 lookups in ~4 min, 894 found (59%)
+- Domain-based batch: 971 lookups, 730 found (75%)
+- High-value batch: 192 lookups via non-batch, 116 found (60%)
+- Final: 1,740 unique persons enriched, 1,702 LinkedIn URLs, ~1,100 email inferences
