@@ -123,3 +123,10 @@ The user's existing browser session has an account that either:
 
 - Selenium Chrome: `docker run selenium/standalone-chrome` on port 4444
 - Could be used for automated searches IF a verified account is available
+
+## Scale test results (plugin API)
+
+No rate limits detected. 1,507 lookups in ~4 minutes.
+Batch size 50, ~8s per batch (~6 lookups/sec).
+894 found (59%), 864 LinkedIn URLs, 215 inferred emails, 149 exact matches.
+Zero errors across all batches.
