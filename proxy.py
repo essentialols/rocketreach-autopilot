@@ -260,6 +260,53 @@ def lookup(req: LookupRequest):
         raise HTTPException(status_code=r.status_code, detail=r.text[:500])
 
 
+class PluginSearchRequest(BaseModel):
+    profiles: list[dict]
+
+
+@app.post("/search/plugin")
+def search_plugin(req: SearchRequest):
+    """
+    Search via /v1/pluginProfileMatch (Chrome extension API).
+    WORKS without email verification! Returns structured profile data.
+    """
+    _ensure_cookies()
+    profile = {"name": req.name}
+    if req.employer:
+        profile["current_employer"] = req.employer
+    if req.title:
+        profile["current_title"] = req.title
+
+    r = SESSION.post(
+        "https://rocketreach.co/v1/pluginProfileMatch",
+        headers=_headers(),
+        json={"profiles": [profile]},
+    )
+    if r.status_code in (200, 201):
+        data = r.json()
+        profiles = data.get("profiles", [])
+        return {
+            "results": profiles,
+            "count": len(profiles),
+            "source": "pluginProfileMatch",
+        }
+    raise HTTPException(status_code=r.status_code, detail=r.text[:500])
+
+
+@app.post("/search/plugin/batch")
+def search_plugin_batch(req: PluginSearchRequest):
+    """Batch search via plugin API. Pass list of {name, current_employer} dicts."""
+    _ensure_cookies()
+    r = SESSION.post(
+        "https://rocketreach.co/v1/pluginProfileMatch",
+        headers=_headers(),
+        json={"profiles": req.profiles},
+    )
+    if r.status_code in (200, 201):
+        return r.json()
+    raise HTTPException(status_code=r.status_code, detail=r.text[:500])
+
+
 @app.post("/captcha")
 def captcha(req: CaptchaRequest):
     """Solve a reCAPTCHA v3 challenge."""
