@@ -32,9 +32,12 @@
   - Chrome TLS fingerprint (curl_cffi)
   - Cloudflare cookies
   - Feature flags (ff3p)
-- The Angular SPA has something the raw HTTP client doesn't
-- Likely candidates: a JavaScript-generated request header, a browser fingerprint in cookies,
-  or a WebSocket session token that's validated server-side
+- Extensively investigated and ruled out: X-RR-For header (null in Brave),
+  X-SOURCE-PAGE, Sec-Fetch headers, HTTP version, \_\_cf_bm cookie, RR_SA token
+  (just UI prefs, XOR key 0x72), RR_INIT_STORE (empty), full Angular init
+  sequence, curl_cffi Chrome TLS impersonation
+- Remaining hypothesis: server-side session flag set during JS page load
+  that can't be replicated via raw HTTP
 
 ### 5. Email verification on official API (NOT BYPASSED)
 
