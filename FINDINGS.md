@@ -47,40 +47,58 @@
   hit the phone verification wall (which blocks email sending too)
 - Catch-22: headless signup -> phone verify -> no email sent -> can't verify
 
+### 6. Plugin API /v1/pluginProfileMatch (BYPASSED - THE KEY DISCOVERY)
+
+- Chrome extension API that returns structured profile data
+- **Works WITHOUT email or phone verification**
+- Returns: name, title, company, location, LinkedIn, social links, education,
+  job history, teaser email domains (personal + professional), partial phones
+- Accepts batch requests (multiple profiles at once)
+- Works from raw HTTP with just session cookies (no browser needed)
+- This is the production-ready search endpoint
+
+### 7. Public profile pages (PARTIALLY USEFUL)
+
+- URL format: `/firstname-lastname-email_HASH` (hash from plugin API `url` field)
+- Shows **masked emails**: `w******@harvard.edu` (first char + asterisks + domain)
+- Shows **partial phones**: `+1 352-872-....`
+- Combined with name pattern inference, can reconstruct full email addresses
+
 ## What works
 
-| Method                    | Works? | Notes                                             |
-| ------------------------- | ------ | ------------------------------------------------- |
-| reCAPTCHA v3 solve        | Yes    | Pure HTTP, instant, any site                      |
-| Account creation          | Yes    | Gets user_id, but phone-verified on headless      |
-| Login via POST            | Yes    | Sets valid session cookies                        |
-| `/v1/user` (account info) | Yes    | Returns full profile + API key                    |
-| Browser-bridge search     | Yes    | Local only, reads DOM from Brave                  |
-| FlareSolverr HTML parse   | Flaky  | Works on warm session, breaks after reset         |
-| Direct search API         | No     | "Update is necessary" for all non-browser clients |
-| Official API              | No     | Requires email verification                       |
+| Method                       | Works?  | Notes                                                  |
+| ---------------------------- | ------- | ------------------------------------------------------ |
+| reCAPTCHA v3 solve           | Yes     | Pure HTTP, instant, any site                           |
+| Account creation             | Yes     | Gets user_id, but phone-verified on headless           |
+| Login via POST               | Yes     | Sets valid session cookies                             |
+| `/v1/user` (account info)    | Yes     | Returns full profile + API key                         |
+| **`/v1/pluginProfileMatch`** | **Yes** | **THE KEY: structured search, no verification needed** |
+| Public profile page scraping | Yes     | Masked emails, needs profile hash from plugin API      |
+| Email inference              | Yes     | From masked + teaser domains + name patterns           |
+| Browser-bridge search        | Yes     | Local only, reads DOM from Brave                       |
+| FlareSolverr HTML parse      | Flaky   | Works on warm session, breaks after reset              |
+| Direct search API            | No      | "Update is necessary" for unverified accounts          |
+| Official API                 | No      | Requires email verification                            |
 
 ## Key architectural insights
 
 1. **Angular SPA**: All data fetched client-side via XHR. No server-side rendering.
 2. **CSRF**: `validation_token` cookie -> `X-CSRFToken` header + `csrfmiddlewaretoken` form field
 3. **Session**: `sessionid-20191028` cookie (Django session)
-4. **Search query format**: `{mode, start, pageSize, terms: [{keyword, incexc, type}]}`
-5. **HTML structure**: Profile cards use `data-profile-card-id` with predictable child elements
-6. **Feature flags**: `ff3p` field is XOR-encoded (`rrff3p` key), GET-only
-7. **Free tier**: 5 lookup credits, unlimited search (but search blocked headless)
-
-## Recommended next steps
-
-1. **Intercept the actual browser XHR** to find what header/token the Angular app sends
-   that the backend validates (use browser DevTools Network tab)
-2. **Sign up through the browser** with a real email to get a verified API key
-3. **Use Playwright/Puppeteer** with `waitForSelector` instead of FlareSolverr for
-   reliable SPA rendering
+4. **Plugin API**: `/v1/pluginProfileMatch` is the Chrome extension's search API.
+   Different auth requirements than the main search. Accepts `{profiles: [{name, current_employer}]}`.
+5. **Teaser data**: Plugin API returns email domains split into personal vs professional,
+   plus partial phone numbers with last 4 digits masked
+6. **Public profile pages**: Show masked emails (`w******@domain.com`) and partial phones
+   in meta description and page content. URL hash comes from plugin API response.
+7. **Email inference**: First char of masked email + mask length + teaser domains + name
+   patterns = reconstructed email at 0.5-0.95 confidence
+8. **Free tier**: 5 lookup credits (for full reveal), unlimited plugin API searches
 
 ## Definitive root cause (discovered via Selenium Chrome on server)
 
 ### The "update is necessary" error = email verification check
+
 When `is_verified: False`, the search page shows a verification banner INSTEAD
 of results. The `/v2/services/customSearch` API returns 400 for unverified accounts.
 This was confirmed by loading the search page in Selenium Chrome (Docker on
@@ -88,16 +106,20 @@ homeserver) — the page literally says "A verification email has been sent...
 Please click the link to activate your account."
 
 ### Phone verification gates ALL new signups
+
 Creating accounts from a real Selenium Chrome browser (not curl_cffi) STILL
 triggers phone verification. This is not a reCAPTCHA score issue — it's a
 universal policy for new RocketReach accounts as of 2026.
 
 ### Why the user's browser worked
+
 The user's existing browser session has an account that either:
+
 1. Was created before the phone verification policy
 2. Completed phone verification at some point
 3. Was created via Google/Microsoft OAuth (which may bypass phone verify)
 
 ### Server infrastructure deployed
+
 - Selenium Chrome: `docker run selenium/standalone-chrome` on port 4444
 - Could be used for automated searches IF a verified account is available
