@@ -326,18 +326,26 @@ def _init_flaresolverr():
     log.info("FlareSolverr session initialized")
 
 
-def _flare_get(url: str, timeout: int = 30000) -> str:
+def _flare_get(url: str, timeout: int = 30000, retries: int = 2) -> str:
+    """Fetch URL via FlareSolverr. Retries if SPA hasn't rendered yet."""
     _init_flaresolverr()
-    r = requests.post(FLARESOLVERR_URL, json={
-        "cmd": "request.get",
-        "url": url,
-        "session": FLARE_SESSION,
-        "maxTimeout": timeout,
-    }, timeout=timeout // 1000 + 10, verify=False)
-    d = r.json()
-    if d.get("status") != "ok":
-        raise RuntimeError(f"FlareSolverr: {d.get('message', 'unknown')}")
-    return d["solution"]["response"]
+    for attempt in range(retries + 1):
+        r = requests.post(FLARESOLVERR_URL, json={
+            "cmd": "request.get",
+            "url": url,
+            "session": FLARE_SESSION,
+            "maxTimeout": timeout,
+        }, timeout=timeout // 1000 + 10, verify=False)
+        d = r.json()
+        if d.get("status") != "ok":
+            raise RuntimeError(f"FlareSolverr: {d.get('message', 'unknown')}")
+        html = d["solution"]["response"]
+        # Check if SPA rendered (profile cards present)
+        if "data-profile-card-id" in html or attempt == retries:
+            return html
+        log.info(f"SPA not rendered yet, retry {attempt + 1}/{retries}")
+        time.sleep(2)
+    return html
 
 
 CARD_RE = re.compile(
