@@ -52,82 +52,95 @@ def find_tab(url_pattern: str) -> int | None:
     return None
 
 
+def _navigate_rr_tab(url: str):
+    """Navigate a RocketReach tab via AppleScript (doesn't steal focus)."""
+    # Find existing RR tab and navigate it, or open in current tab
+    script = f'''
+    tell application "Brave Browser"
+        repeat with w in windows
+            repeat with t in tabs of w
+                if URL of t contains "rocketreach.co" then
+                    set URL of t to "{url}"
+                    return "ok"
+                end if
+            end repeat
+        end repeat
+        set URL of active tab of front window to "{url}"
+        return "new"
+    end tell'''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
 def search_via_browser(name: str, employer: str = "", tab_id: int | None = None) -> list:
     """
     Search RocketReach by navigating the browser and scraping results.
 
-    This bypasses anti-bot checks because the request originates from
-    a real browser session with full Cloudflare/DataDome clearance.
+    Uses AppleScript for navigation (reliable, no MAIN world issues)
+    and browser-bridge query_all for DOM scraping (ISOLATED world).
+    Requires a logged-in RocketReach session in Brave.
     """
-    # Build search URL
     params = f"name={name.replace(' ', '+')}&start=1&pageSize=10"
     if employer:
         params += f"&current_employer={employer.replace(' ', '+')}"
     url = f"https://rocketreach.co/person?{params}"
 
     print(f"[*] Navigating to: {url}")
-
-    # Navigate using bridge
-    import requests
-    try:
-        # Use the navigate builtin
-        bridge_cmd(f"navigate {url}", tab_id)
-    except Exception:
-        # Fallback: use osascript
-        subprocess.run([
-            "osascript", "-e",
-            f'tell application "Brave Browser" to set URL of active tab of front window to "{url}"'
-        ], capture_output=True)
+    _navigate_rr_tab(url)
 
     # Wait for Angular to render results
     print("[*] Waiting for results to load...")
-    time.sleep(6)
+    for attempt in range(4):
+        time.sleep(5 + attempt * 2)
+        resp = bridge_cmd(
+            "query_all [data-profile-card-id]", tab_id, timeout=10,
+        )
+        items = json.loads(resp.get("html", "[]"))
+        if items:
+            break
 
-    # Scrape results
-    resp = bridge_cmd(
-        "query_all .result-items p, .result-items span, .result-items a",
-        tab_id,
+    if not items:
+        print("[!] No profile cards found")
+        return []
+
+    # Get detailed data from each card
+    resp2 = bridge_cmd(
+        "query_all [data-profile-card-id] #profile-name, "
+        "[data-profile-card-id] p, "
+        "[data-profile-card-id] span, "
+        "[data-profile-card-id] a",
+        tab_id, timeout=10,
     )
-    items = json.loads(resp.get("html", "[]"))
+    elements = json.loads(resp2.get("html", "[]"))
 
-    # Parse into structured results
+    # Parse using profile-name as card delimiter
     results = []
     current = {}
-    field_order = ["name", "title", "company"]
-    field_idx = 0
+    for el in elements:
+        text = el.get("text", "").strip()
+        tag = el.get("tag", "")
+        attrs = el.get("attrs", {})
+        iid = attrs.get("id", "")
+        href = attrs.get("href", "")
 
-    for item in items:
-        text = item.get("text", "").strip()
-        tag = item.get("tag", "")
-        cls = item.get("classes", "")
-        href = item.get("attrs", {}).get("href", "")
-
-        if not text or text in ("Get Contact Info", "more"):
-            continue
-
-        if tag == "P" and field_idx == 0:
-            # Start of a new result
+        if iid == "profile-name":
             if current.get("name"):
                 results.append(current)
-                current = {}
-                field_idx = 0
-            current["name"] = text
-            field_idx = 1
-        elif tag == "P" and field_idx == 1:
-            current["title"] = text
-            field_idx = 2
-        elif tag == "P" and field_idx == 2:
-            current["company"] = text
-            field_idx = 3
-        elif "location" in cls.lower() or ("United States" in text or "," in text and len(text) < 80):
-            if "location" not in current:
-                current["location"] = text
-        elif "@" in text and "." in text:
+            current = {"name": text}
+        elif not current.get("name"):
+            continue
+        elif tag == "P" and text and len(text) > 2:
+            if text == "Get contact info to view data":
+                continue
+            if "title" not in current:
+                current["title"] = text
+            elif "company" not in current:
+                current["company"] = text
+        elif "@" in text and "." in text and len(text) < 40:
             current.setdefault("email_hint", text)
-        elif text.startswith("+") or re.match(r"^\+?\d[\d\s-]{8,}", text):
+        elif text.startswith("+") and any(c.isdigit() for c in text):
             current.setdefault("phone_hint", text)
-        elif href and "/profile" in href:
-            current["profile_url"] = f"https://rocketreach.co{href}"
+        elif href and "-profile_" in href:
+            current["company_url"] = f"https://rocketreach.co{href}"
 
     if current.get("name"):
         results.append(current)
