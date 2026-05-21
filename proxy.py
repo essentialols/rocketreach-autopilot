@@ -322,8 +322,32 @@ def _init_flaresolverr():
             "maxTimeout": 30000,
             "cookies": cookie_list,
         }, timeout=35, verify=False)
+    # Warm up: visit dashboard then a search page to prime Angular SPA cache
+    log.info("Warming up FlareSolverr: visiting dashboard...")
+    requests.post(FLARESOLVERR_URL, json={
+        "cmd": "request.get",
+        "url": "https://rocketreach.co/dashboard",
+        "session": FLARE_SESSION,
+        "maxTimeout": 20000,
+    }, timeout=25, verify=False)
+    log.info("Warming up FlareSolverr: visiting search page...")
+    requests.post(FLARESOLVERR_URL, json={
+        "cmd": "request.get",
+        "url": "https://rocketreach.co/person?name=test&start=1&pageSize=1",
+        "session": FLARE_SESSION,
+        "maxTimeout": 20000,
+    }, timeout=25, verify=False)
     _flare_initialized = True
-    log.info("FlareSolverr session initialized")
+    log.info("FlareSolverr session initialized and warmed up")
+
+
+@app.post("/flare/warmup")
+def warmup_flare():
+    """Manually re-initialize and warm up the FlareSolverr session."""
+    global _flare_initialized
+    _flare_initialized = False
+    _init_flaresolverr()
+    return {"status": "ok", "warmed_up": True}
 
 
 def _flare_get(url: str, timeout: int = 30000, retries: int = 2) -> str:
